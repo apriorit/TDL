@@ -215,6 +215,87 @@ NTSTATUS CloseDispatch(
 	return Irp->IoStatus.Status;
 }
 
+//
+// Create thread function
+//
+_Function_class_(KSTART_ROUTINE)
+static VOID ThreadWorker(PVOID context)
+{
+    DbgPrint("Thread created by DUMMY driver.\n");
+}
+
+void DummyCreateThread()
+{
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, 0, OBJ_KERNEL_HANDLE, 0, 0);
+
+    HANDLE hThread = NULL;
+    auto status = PsCreateSystemThread(&hThread,
+        0L,
+        &oa,
+        NULL,
+        NULL,
+        ThreadWorker,
+        NULL);
+
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint("DUMMY: Thread creation faild.\n");
+        return;
+    }
+
+    ZwClose(hThread);
+}
+
+_Function_class_(IO_WORKITEM_ROUTINE_EX)
+static VOID WorkerRoutine(_In_ PVOID IoObject, _In_opt_ PVOID Context, _In_ PIO_WORKITEM IoWorkItem)
+{
+    UNREFERENCED_PARAMETER(IoObject);
+    PDRIVER_OBJECT DriverObject = (PDRIVER_OBJECT)Context;
+    IoFreeWorkItem(IoWorkItem);
+
+    NTSTATUS        status;
+    UNICODE_STRING  SymLink, DevName;
+    PDEVICE_OBJECT  devobj;
+    ULONG           t;
+
+#ifdef DEBUGPRINT
+    DbgPrint("%s\n", __FUNCTION__);
+#endif
+
+    RtlInitUnicodeString(&DevName, L"\\Device\\dummyCreateThread");
+    status = IoCreateDevice(DriverObject, 0, &DevName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, TRUE, &devobj);
+
+#ifdef DEBUGPRINT
+    DbgPrint("%s IoCreateDevice(%wZ) = %lx\n", __FUNCTION__, DevName, status);
+#endif
+
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&SymLink, L"\\DosDevices\\TDLD");
+    status = IoCreateSymbolicLink(&SymLink, &DevName);
+
+#ifdef DEBUGPRINT
+    DbgPrint("%s IoCreateSymbolicLink(%wZ) = %lx\n", __FUNCTION__, SymLink, status);
+#endif
+
+    devobj->Flags |= DO_BUFFERED_IO;
+
+    for (t = 0; t <= IRP_MJ_MAXIMUM_FUNCTION; t++)
+        DriverObject->MajorFunction[t] = &UnsupportedDispatch;
+
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = &DevioctlDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = &CreateDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = &CloseDispatch;
+    DriverObject->DriverUnload = NULL; //nonstandard way of driver loading, no unload
+
+    DummyCreateThread();
+
+    devobj->Flags &= ~DO_DEVICE_INITIALIZING;
+}
+
 /*
 * DriverInitialize
 *
@@ -228,49 +309,21 @@ NTSTATUS DriverInitialize(
 	_In_  PUNICODE_STRING RegistryPath
 	)
 {
-	NTSTATUS        status;
-	UNICODE_STRING  SymLink, DevName;
-	PDEVICE_OBJECT  devobj;
-	ULONG           t;
+    PIO_WORKITEM workItem = IoAllocateWorkItem(PsGetCurrentProcess());
+    if (!workItem)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-	//RegistryPath is NULL
-	UNREFERENCED_PARAMETER(RegistryPath);   
+    IoQueueWorkItemEx(workItem
+        , WorkerRoutine
+        , DelayedWorkQueue
+        , DriverObject);
 
-#ifdef DEBUGPRINT
-	DbgPrint("%s\n", __FUNCTION__);
-#endif
-
-	RtlInitUnicodeString(&DevName, L"\\Device\\TDLD");
-	status = IoCreateDevice(DriverObject, 0, &DevName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, TRUE, &devobj);
-
-#ifdef DEBUGPRINT
-	DbgPrint("%s IoCreateDevice(%wZ) = %lx\n", __FUNCTION__, DevName, status);
-#endif
-
-	if (!NT_SUCCESS(status)) {
-		return status;
-	}
-
-	RtlInitUnicodeString(&SymLink, L"\\DosDevices\\TDLD");
-	status = IoCreateSymbolicLink(&SymLink, &DevName);
-
-#ifdef DEBUGPRINT
-	DbgPrint("%s IoCreateSymbolicLink(%wZ) = %lx\n", __FUNCTION__, SymLink, status);
-#endif
-
-	devobj->Flags |= DO_BUFFERED_IO;
-
-	for (t = 0; t <= IRP_MJ_MAXIMUM_FUNCTION; t++)
-		DriverObject->MajorFunction[t] = &UnsupportedDispatch;
-
-	DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = &DevioctlDispatch;
-	DriverObject->MajorFunction[IRP_MJ_CREATE] = &CreateDispatch;
-	DriverObject->MajorFunction[IRP_MJ_CLOSE] = &CloseDispatch;
-	DriverObject->DriverUnload = NULL; //nonstandard way of driver loading, no unload
-
-	devobj->Flags &= ~DO_DEVICE_INITIALIZING;
-	return status;
+	
+	return STATUS_SUCCESS;
 }
+
 
 /*
 * DriverEntry
@@ -298,7 +351,7 @@ NTSTATUS DriverEntry(
 	DbgPrint("%s\n", __FUNCTION__);
 #endif
 
-	RtlInitUnicodeString(&drvName, L"\\Driver\\TDLD");
+	RtlInitUnicodeString(&drvName, L"\\Driver\\dummyNormal");
 	status = IoCreateDriver(&drvName, &DriverInitialize);
 
 #ifdef DEBUGPRINT
@@ -307,3 +360,4 @@ NTSTATUS DriverEntry(
 
 	return status;
 }
+
