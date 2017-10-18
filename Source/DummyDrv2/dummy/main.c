@@ -251,9 +251,39 @@ _Function_class_(IO_WORKITEM_ROUTINE_EX)
 static VOID WorkerRoutine(_In_ PVOID IoObject, _In_opt_ PVOID Context, _In_ PIO_WORKITEM IoWorkItem)
 {
     UNREFERENCED_PARAMETER(IoObject);
-    PDRIVER_OBJECT DriverObject = (PDRIVER_OBJECT)Context;
+    UNREFERENCED_PARAMETER(Context);
     IoFreeWorkItem(IoWorkItem);
 
+    NTSTATUS        status;
+    UNICODE_STRING  drvName;
+
+    PrintIrql();
+
+#ifdef DEBUGPRINT
+    DbgPrint("%s\n", __FUNCTION__);
+#endif
+
+    RtlInitUnicodeString(&drvName, L"\\Driver\\dummyNormal");
+    status = IoCreateDriver(&drvName, &DriverInitialize);
+
+#ifdef DEBUGPRINT
+    DbgPrint("%s IoCreateDriver(%wZ) = %lx\n", __FUNCTION__, drvName, status);
+#endif
+}
+
+/*
+* DriverInitialize
+*
+* Purpose:
+*
+* Driver main.
+*
+*/
+NTSTATUS DriverInitialize(
+	_In_  struct _DRIVER_OBJECT *DriverObject,
+	_In_  PUNICODE_STRING RegistryPath
+	)
+{
     NTSTATUS        status;
     UNICODE_STRING  SymLink, DevName;
     PDEVICE_OBJECT  devobj;
@@ -263,7 +293,7 @@ static VOID WorkerRoutine(_In_ PVOID IoObject, _In_opt_ PVOID Context, _In_ PIO_
     DbgPrint("%s\n", __FUNCTION__);
 #endif
 
-    RtlInitUnicodeString(&DevName, L"\\Device\\dummyCreateThread");
+    RtlInitUnicodeString(&DevName, L"\\Device\\dummyNormal");
     status = IoCreateDevice(DriverObject, 0, &DevName, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, TRUE, &devobj);
 
 #ifdef DEBUGPRINT
@@ -291,37 +321,11 @@ static VOID WorkerRoutine(_In_ PVOID IoObject, _In_opt_ PVOID Context, _In_ PIO_
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = &CloseDispatch;
     DriverObject->DriverUnload = NULL; //nonstandard way of driver loading, no unload
 
-    DummyCreateThread();
+                                       //DummyCreateThread();
 
     devobj->Flags &= ~DO_DEVICE_INITIALIZING;
-}
 
-/*
-* DriverInitialize
-*
-* Purpose:
-*
-* Driver main.
-*
-*/
-NTSTATUS DriverInitialize(
-	_In_  struct _DRIVER_OBJECT *DriverObject,
-	_In_  PUNICODE_STRING RegistryPath
-	)
-{
-    PIO_WORKITEM workItem = IoAllocateWorkItem(PsGetCurrentProcess());
-    if (!workItem)
-    {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    IoQueueWorkItemEx(workItem
-        , WorkerRoutine
-        , DelayedWorkQueue
-        , DriverObject);
-
-	
-	return STATUS_SUCCESS;
+    return status;
 }
 
 
@@ -338,26 +342,21 @@ NTSTATUS DriverEntry(
   _In_  PUNICODE_STRING RegistryPath
 )
 {
-	NTSTATUS        status;
-	UNICODE_STRING  drvName;   
-    
-	/* This parameters are invalid due to nonstandard way of loading and should not be used. */
-	UNREFERENCED_PARAMETER(DriverObject);
-	UNREFERENCED_PARAMETER(RegistryPath);
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(RegistryPath);
 
-    PrintIrql();
+    PIO_WORKITEM workItem = IoAllocateWorkItem(PsGetCurrentProcess());
+    if (!workItem)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-#ifdef DEBUGPRINT
-	DbgPrint("%s\n", __FUNCTION__);
-#endif
+    IoQueueWorkItemEx(workItem
+        , WorkerRoutine
+        , DelayedWorkQueue
+        , NULL);
 
-	RtlInitUnicodeString(&drvName, L"\\Driver\\dummyNormal");
-	status = IoCreateDriver(&drvName, &DriverInitialize);
 
-#ifdef DEBUGPRINT
-	DbgPrint("%s IoCreateDriver(%wZ) = %lx\n", __FUNCTION__, drvName, status);
-#endif
-
-	return status;
+    return STATUS_SUCCESS;
 }
 
