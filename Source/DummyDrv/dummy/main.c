@@ -15,7 +15,7 @@
 *
 *******************************************************************************/
 
-#include <ntddk.h>
+#include "TestFuncs.h"
 
 DRIVER_INITIALIZE DriverEntry;
 #pragma alloc_text(INIT, DriverEntry)
@@ -33,12 +33,19 @@ NTSTATUS DriverEntry(
     _In_  PUNICODE_STRING RegistryPath
 )
 {
+    DbgBreakPoint();
+    
     PEPROCESS Process;
     KIRQL Irql;
     PWSTR sIrql;
-
     /* This parameters are invalid due to nonstandard way of loading and should not be used. */
+
+#ifdef MODE_HONESTDRIVER
+    DriverObject->DriverUnload = Unload;
+#else
     UNREFERENCED_PARAMETER(DriverObject);
+#endif
+
     UNREFERENCED_PARAMETER(RegistryPath);
 
     DbgPrint("Hello from kernel mode, system range start is %p, code mapped at %p\n", MmSystemRangeStart, DriverEntry);
@@ -81,5 +88,25 @@ NTSTATUS DriverEntry(
 
     DbgPrint("KeGetCurrentIrql=%ws\n", sIrql);
 
-    return STATUS_SUCCESS;
+#ifdef MODE_CREATETHREAD
+    DbgPrint("Driver is creating a thread\n");
+    StartThread();
+#endif
+
+#ifdef MODE_OPENREGISTRY
+    DbgPrint("Driver is opening a registry key\n");
+    OpenReg();
+#endif
+
+#ifdef MODE_OPENFILE
+    DbgPrint("Driver is opening a file\n");
+    OpenFile();
+#endif
+
+#ifdef MODE_LOADIMAGE
+    DbgPrint("Driver is loading another driver\n");
+    LoadDriver();
+#endif
+
+return STATUS_SUCCESS;
 }

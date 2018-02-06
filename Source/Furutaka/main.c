@@ -37,6 +37,7 @@ WCHAR      g_BE = 0xFEFF;
 ULONG      g_NtBuildNumber = 0;
 
 #define VBoxDrvSvc      TEXT("VBoxDrv")
+#define dummyDrvSvc     TEXT("dummy")
 #define supImageName    "furutaka"
 #define supImageHandle  0x1a000
 #define PAGE_SIZE       0x1000
@@ -44,8 +45,122 @@ ULONG      g_NtBuildNumber = 0;
 #define T_LOADERTITLE   TEXT("Turla Driver Loader v1.1.1 (20/04/17)")
 #define T_LOADERUNSUP   TEXT("Unsupported WinNT version\r\n")
 #define T_LOADERRUN     TEXT("Another instance running, close it before\r\n")
-#define T_LOADERUSAGE   TEXT("Usage: loader drivertoload\n\re.g. loader mydrv.sys\r\n")
+#define T_LOADERUSAGE   TEXT("Usage: loader dummy - loads simple dummy.sys driver with DriverEntry only\n \
+loader createthread - loads driver which creates a thread\n \
+loader openregistry - loads driver which opens a registry key for read\n \
+loader openfile - loads driver which opens a file for read\n \
+loader loadimage - loads driver which starts another driver legally\n \
+loader original driverName.sys - loads driverName.sys driver provided by user\n")
 #define T_LOADERINTRO   TEXT("Turla Driver Loader v1.1.1 started\r\n(c) 2016 - 2017 TDL Project\r\nSupported x64 OS : 7 and above\r\n")
+
+/*
+* ExtractBinResource
+*
+* Purpose:
+*
+* Extracts drivers from binary resources and saves it to file
+*
+*/
+BOOL ExtractBinResource(const PWCHAR resourceName, const PWCHAR pathToSave)
+{
+    HRSRC hResource = FindResource(NULL, resourceName, L"BINARY");
+    if (!hResource)
+    {
+        cuiPrintText(g_ConOut, TEXT("Preparation: Resource is not found"), g_ConsoleOutput, TRUE);
+    }
+
+    DWORD size = SizeofResource(NULL, hResource);
+    HGLOBAL data = LoadResource(NULL, hResource);
+    if (!data)
+    {
+        cuiPrintText(g_ConOut, TEXT("Preparation: Can't lock resource"), g_ConsoleOutput, TRUE);
+    }
+
+    HANDLE hFile = CreateFile(pathToSave
+        , GENERIC_WRITE
+        , 0
+        , NULL
+        , CREATE_NEW
+        , FILE_ATTRIBUTE_NORMAL
+        , NULL);
+    if (!hFile)
+    {
+        cuiPrintText(g_ConOut, TEXT("Preparation: Cannot create file to save binary resource"), g_ConsoleOutput, TRUE);
+    }
+
+    DWORD bytesWritten = 0;
+    BOOL writeResult = WriteFile(hFile, data, size, &bytesWritten, NULL);
+    FreeResource(data);
+    CloseHandle(hFile);
+    if (!writeResult || (size != bytesWritten))
+    {
+        cuiPrintText(g_ConOut, TEXT("Preparation: Cannot write binary resource to file"), g_ConsoleOutput, TRUE);
+    }
+    return writeResult;
+}
+
+/*
+* InstallHonestDriver
+*
+* Purpose:
+*
+* Installs pre-built dummy driver legally to start it from "illegal" driver later.
+*
+*/
+BOOL InstallHonestDriver()
+{
+    WCHAR szTestDriverFileName[MAX_PATH * 2];
+    RtlSecureZeroMemory(szTestDriverFileName, sizeof(szTestDriverFileName));
+    BOOL retVal = FALSE;
+
+    if (!GetCurrentDirectory(MAX_PATH * 2, szTestDriverFileName))
+    {
+        return retVal;
+    }
+    _strcat(szTestDriverFileName, TEXT("dummy_honestdriver.sys"));
+
+    if (!ExtractBinResource(TEXT("honestdriver"), szTestDriverFileName)
+        && !PathFileExists(szTestDriverFileName))
+    {
+        cuiPrintText(g_ConOut, TEXT("Preparation: Cannot extract honest driver."), g_ConsoleOutput, TRUE);
+        return retVal;
+    }
+    
+    SC_HANDLE schSCManager = NULL;
+    schSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!schSCManager)
+    {
+        cuiPrintText(g_ConOut, TEXT("Preparaion: Cannot open SC manager"), g_ConsoleOutput, FALSE);
+        return retVal;
+    }
+
+    if (scmInstallDriver(schSCManager, dummyDrvSvc, szTestDriverFileName))
+    {
+        retVal = TRUE;
+        cuiPrintText(g_ConOut, TEXT("Preparaion: Test driver has been installed"), g_ConsoleOutput, FALSE);
+    }
+    else
+    {
+        cuiPrintText(g_ConOut, TEXT("Preparaion: Installing test driver failed"), g_ConsoleOutput, FALSE);
+    }
+
+    CloseHandle(schSCManager);
+    return retVal;
+}
+
+/*
+* RemoveHonestDriver
+*
+* Purpose:
+*
+* Removes the legally installed driver after test is completed
+*
+*/
+BOOL RemoveHonestDriver(_In_ SC_HANDLE schSCManager)
+{
+    return scmRemoveDriver(schSCManager, dummyDrvSvc);
+}
+
 
 /*
 * TDLVBoxInstalled
@@ -750,40 +865,134 @@ void TDLStopVulnerableDriver(
     CloseServiceHandle(schSCManager);
 }
 
+
+/*
+* GetTextParameter
+*
+* Purpose:
+*
+* Extract test name from command line.
+*
+*/
+BOOL GetTextParameter(_In_ LPWSTR lpCommandLine, ULONG index, WCHAR* buf, ULONG bufSize)
+{
+    ULONG  c = 0;
+
+    GetCommandLineParam(lpCommandLine, index, (LPWSTR)buf, bufSize - 1, &c);
+    if (c == 0)
+    {
+        cuiPrintText(g_ConOut, 
+            T_LOADERUSAGE,
+            g_ConsoleOutput, FALSE);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 /*
 * TDLProcessCommandLine
 *
 * Purpose:
 *
-* Extract target driver from command line and continue with it load.
+* gets cmd parameters, prepare driver names and proceeds to loading
 *
 */
 UINT TDLProcessCommandLine(
     _In_ LPWSTR lpCommandLine
 )
 {
-    UINT   retVal = (UINT)-1;
-    WCHAR  szInputFile[MAX_PATH + 1];
-    ULONG  c;
-
-    //input file
-    c = 0;
+    UINT retVal = (UINT)-1;
+    WCHAR szInputFile[MAX_PATH + 1];
+    WCHAR szInputMode[MAX_PATH + 1];
+    RtlSecureZeroMemory(szInputMode, sizeof(szInputMode));
     RtlSecureZeroMemory(szInputFile, sizeof(szInputFile));
-    GetCommandLineParam(lpCommandLine, 1, (LPWSTR)&szInputFile, MAX_PATH, &c);
-    if (c == 0) {
+    BOOL installAdditionalTestHonestly = FALSE;
+
+    if (!GetTextParameter(lpCommandLine, 1, szInputMode, MAX_PATH))
+    {
+        return retVal;
+    }
+
+    if (wcscmp(szInputMode, TEXT("original")) == 0)
+    {
+        if (!GetTextParameter(lpCommandLine, 2, szInputFile, MAX_PATH))
+        {
+            return retVal;
+        }
+    }
+    else if (wcscmp(szInputMode, TEXT("dummy")) == 0
+        || wcscmp(szInputMode, TEXT("openregistry")) == 0
+        || wcscmp(szInputMode, TEXT("openfile")) == 0
+        || wcscmp(szInputMode, TEXT("openfile")) == 0
+        || wcscmp(szInputMode, TEXT("createthread")) == 0
+        || wcscmp(szInputMode, TEXT("loadimage")) == 0)
+    {
+        _strcat(szInputFile, TEXT("dummy"));
+        if (wcscmp(szInputMode, TEXT("dummy")) != 0)
+        {
+            _strcat(szInputFile, TEXT("_"));
+            _strcat(szInputFile, szInputMode);
+        }
+        _strcat(szInputFile, TEXT(".sys"));
+        if (wcscmp(szInputMode, TEXT("loadimage")) == 0)
+        {
+            installAdditionalTestHonestly = TRUE;
+        }
+        if (!ExtractBinResource(szInputMode, szInputFile)
+            && !PathFileExists(szInputFile))
+        {
+            cuiPrintText(g_ConOut, TEXT("Preparation: Cannot extract driver from resources."), g_ConsoleOutput, FALSE);
+            return retVal;
+        }
+    }
+    else
+    {
         cuiPrintText(g_ConOut,
-            T_LOADERUSAGE,
+            TEXT("Ldr: Unknown mode"),
             g_ConsoleOutput, FALSE);
         return retVal;
     }
 
     if (PathFileExists(szInputFile)) {
+        
+        //install test driver if required
+        if (installAdditionalTestHonestly && !InstallHonestDriver())
+        {
+            return retVal;
+        }
+
         g_hVBox = TDLStartVulnerableDriver();
-        if (g_hVBox != INVALID_HANDLE_VALUE) {
+        if (g_hVBox != INVALID_HANDLE_VALUE) 
+        {
             retVal = TDLMapDriver(szInputFile);
+
+            if (installAdditionalTestHonestly)
+            {
+                MessageBox(0, TEXT("Wait while dirver completes its test"), TEXT("Wait"), 0);
+            }
+            
             TDLStopVulnerableDriver();
         }
-    }
+        
+        //remove honest driver if required
+        if (installAdditionalTestHonestly)
+        {
+            if (scmUnloadDeviceDriver(dummyDrvSvc))
+            {
+                cuiPrintText(g_ConOut, TEXT("Preparaion: Honest driver has been removed\n"), g_ConsoleOutput, FALSE);
+            }
+            else
+            {
+                cuiPrintText(g_ConOut, TEXT("Preparaion: Cannot remove honest driver\n"), g_ConsoleOutput, FALSE);
+            }
+            /*if (schSCManager)
+            {
+                RemoveTestDriver(schSCManager);
+                CloseHandle(schSCManager);
+                cuiPrintText(g_ConOut, TEXT("Preparaion: Test driver has been removed\n"), g_ConsoleOutput, FALSE);
+            }*/
+        }
+     }
     else {
         cuiPrintText(g_ConOut,
             TEXT("Ldr: Input file not found"),
